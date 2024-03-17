@@ -1,0 +1,100 @@
+---
+title: "Sense Checking"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(parallel)
+library(dplyr, warn.conflicts = FALSE)
+library(ggplot2)
+
+library(terra)
+library(gdalraster)
+
+```
+
+```{r}
+#Data paths
+## Path to Dry Sclerophyll forest classes
+DSF_CLASS_PATH <- here::here("data/dsf_classes.tif")
+##Path to masked Dry Sclerophyll forest classes
+DSF_MASK_PATH <- here::here("data/rdsf_mask.tif")
+
+
+
+##Path to Lidar Metadata
+LIDAR_METADATA_PATH <- here::here("data/lidar_metadata.gpkg")
+##Path to rasterised Lidar metadata
+RLIDAR_PATH <- here::here("data/lidar_coverage_3308.tif")
+```
+
+```{r}
+#Read data files
+#Read dsf classes
+dsf_classes <- terra::rast(DSF_CLASS_PATH)
+dsf_crop <- terra::rast(DSF_MASK_PATH)
+
+#read lidar metadata
+lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
+
+#Read rasterised lidar
+rlidar <- terra::rast(RLIDAR_PATH)
+```
+
+```{r}
+#Quick check to sample the which class is most common
+set.seed(1)
+pts <- terra::spatSample(as.polygons(lidar_metadata), 10000)
+test <- terra::extract(dsf_classes, pts)
+
+ggplot(na.omit(test), aes(VEGCLASS)) + geom_bar() + scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+Masking dry sclerophyll raster to rasterised lidar extent
+
+```{r}
+#Crop rlidar raster to match extent of dsf_classes raster. Had to do multiple crops to get it working
+##Crop dsf_classes raster to lidar_metadata extent
+dsf_crop <- terra::crop(dsf_classes, lidar_metadata)
+
+##crop rasterised lidar_metadata to cropped dsf classes raster 
+rlidar_crop <- teraa::crop(rlidar, dsf_crop)
+
+#mask dsf_crop raster with cropped, rasterised lidar and write to disk
+rdsf_mask <- terra::mask(dsf_crop, rlidar_crop)
+terra::writeRaster(rdsf_mask, here::here("data/rdsf_mask.tif"))
+```
+
+Creating new attribute table with gdalraster (see DSF_class_raster.rmd)
+
+```{r}
+#Read masked rdsf file
+#Read masked rdsf file
+rdsf_mask <- terra::rast(DSF_MASK_PATH)
+dsf_classes <- terra::rast(DSF_CLASS_PATH)
+
+#get cats list
+rdsf_mask_classes <- terra::cats(rdsf_mask)
+
+#make new attribute table using gdalraster
+gdsf_mask <- new(GDALRaster, DSF_MASK_PATH, read_only = FALSE)
+
+dsf_colours <- palette.colors(length(rdsf_mask), palette = "Alphabet") %>%
+  col2rgb() %>%
+  t()
+
+dat_rat <- data.frame(VALUE = 1:length(rdsf_mask_classes),
+                      VEGCLASS = rdsf_mask_classes,
+                      R = dsf_colours[, "red"],
+                      G = dsf_colours[, "green"],
+                      B = dsf_colours[, "blue"])
+
+# Note: This will take a few minutes
+tbl <- gdalraster::buildRAT(gdsf_mask, table_type = "thematic", na_value = -9999, join_df = dat_rat)
+
+gdsf_mask$setDefaultRAT(band = 1, tbl)
+gdsf_mask$flushCache()
+```

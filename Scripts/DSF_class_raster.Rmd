@@ -1,0 +1,120 @@
+---
+title: "Extract selected DSF classes form SVTM 2023 raster layer"
+author: "Michael"
+date: "2024-02-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr, warn.conflicts = FALSE)
+library(gdalraster)
+library(terra)
+
+```
+
+
+Connect to the SVTM raster.
+
+```{r}
+
+path <- "f:/michael/NSW_SVTM_December2023/SVTM_NSW_Extant_PCT_vC2_0_M2_0/SVTM_NSW_Extant_PCT_vC2_0_M2_0_5m.tif"
+
+rsvtm <- rast(path)
+
+```
+
+
+Set veg class to be the active category in the raster attribute table.
+
+```{r}
+
+activeCat(rsvtm) <- "vegClass"
+
+```
+
+
+List the DSF classes.
+
+```{r}
+
+dat_all_classes <- cats(rsvtm)[[1]]
+
+dsf_classes <- dat_all_classes$vegClass |>
+  unique() |>
+  sort() |>
+  grep(pattern = "dry sclerophyll", ignore.case = TRUE, value = TRUE)
+
+dsf_classes
+
+```
+
+
+Create a raster for the DSF classes, with other veg classes and cleared land set to NA.
+
+```{r}
+
+# Find the raster cell values that map to each of the DSF classes
+dat_classify <- dat_all_classes %>%
+  dplyr::select(Value, vegClass) %>%
+  mutate(newValue = match(vegClass, dsf_classes, nomatch = NA_integer_))
+
+# Two-column matrix version for terra
+m_classify <- dat_classify %>%
+  dplyr::select(Value, newValue) %>%
+  dplyr::filter(!is.na(newValue)) %>%
+  as.matrix()
+
+
+rdsf_class <- terra::classify(rsvtm, m_classify, others = NA_integer_,
+                              filename = "dsf_classes.tif",
+                              datatype = "INT2U",
+                              overwrite = TRUE,
+                              gdal = c("COMPRESS=LZW", "PREDICTOR=2"),
+                              progress = 1)
+
+```
+
+
+Add a raster attribute table using the gdalraster package, following the example in the 'raster attribute tables' vignette.
+
+You can probably do this with the terra package but I can't figure out how to do it without the very time-consuming re-writing of the raster to a new GeoTIFF. As it is, this method usign the gdalraster package requires a slow scan of the raster so there's time for a coffee.
+
+```{r}
+
+rm(rdsf_class)
+
+gdsf_class <- new(GDALRaster, "dsf_classes.tif", read_only = FALSE)
+
+dsf_colours <- palette.colors(length(dsf_classes), palette = "Alphabet") %>%
+  col2rgb() %>%
+  t()
+
+dat_rat <- data.frame(VALUE = 1:length(dsf_classes),
+                      VEGCLASS = dsf_classes,
+                      R = dsf_colours[, "red"],
+                      G = dsf_colours[, "green"],
+                      B = dsf_colours[, "blue"])
+
+# Note: This will take a few minutes
+tbl <- gdalraster::buildRAT(gdsf_class, table_type = "thematic", na_value = -9999, join_df = dat_rat)
+
+gdsf_class$setDefaultRAT(band = 1, tbl)
+gdsf_class$flushCache()
+
+```
+
+
+Reload the terra version which should now have the RAT
+
+```{r}
+
+rm(gdsf_class)
+rm(tbl)
+
+rdsf_class <- rast("dsf_classes.tif")
+plot(rdsf_class)
+
+```
+
