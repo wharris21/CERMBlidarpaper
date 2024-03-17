@@ -50,3 +50,6 @@ rsconnect/
 
 # LiDAR Data foler
 data/
+
+#onedrive weirdness
+*Wills_Laptop*
