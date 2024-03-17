@@ -20,8 +20,8 @@ library(gdalraster)
 #Data paths
 ## Path to Dry Sclerophyll forest classes
 DSF_CLASS_PATH <- here::here("data/dsf_classes.tif")
-##Path to masked Dry Sclerophyll forest classes
-DSF_MASK_PATH <- here::here("data/rdsf_mask.tif")
+##Path to masked Dry Sclerophyll forest classes with attribute table
+DSF_MASK_PATH <- here::here("data/dsf_classes_with_lidar.tif")
 
 
 
@@ -35,7 +35,7 @@ RLIDAR_PATH <- here::here("data/lidar_coverage_3308.tif")
 #Read data files
 #Read dsf classes
 dsf_classes <- terra::rast(DSF_CLASS_PATH)
-dsf_crop <- terra::rast(DSF_MASK_PATH)
+dsf_classes_lidar <- terra::rast(DSF_MASK_PATH)
 
 #read lidar metadata
 lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
@@ -58,17 +58,17 @@ Masking dry sclerophyll raster to rasterised lidar extent
 ```{r}
 #Crop rlidar raster to match extent of dsf_classes raster. Had to do multiple crops to get it working
 ##Crop dsf_classes raster to lidar_metadata extent
-dsf_crop <- terra::crop(dsf_classes, lidar_metadata)
+dsf_classes_lidar <- terra::crop(dsf_classes, lidar_metadata)
 
 ##crop rasterised lidar_metadata to cropped dsf classes raster 
-rlidar_crop <- teraa::crop(rlidar, dsf_crop)
+rlidar_crop <- teraa::crop(rlidar, dsf_classes_lidar)
 
 #mask dsf_crop raster with cropped, rasterised lidar and write to disk
-rdsf_mask <- terra::mask(dsf_crop, rlidar_crop)
+rdsf_mask <- terra::mask(dsf_classes_lidar, rlidar_crop)
 terra::writeRaster(rdsf_mask, here::here("data/rdsf_mask.tif"))
 ```
 
-Creating new attribute table with gdalraster (see DSF_class_raster.rmd)
+Creating new attribute table with gdalraster (see DSF_class_raster.rmd). Turns out QGIS is a lot faster than this.
 
 ```{r}
 #Read masked rdsf file
@@ -98,3 +98,31 @@ tbl <- gdalraster::buildRAT(gdsf_mask, table_type = "thematic", na_value = -9999
 gdsf_mask$setDefaultRAT(band = 1, tbl)
 gdsf_mask$flushCache()
 ```
+
+Calculating percent coverage of DSF classes within Lidar extent
+
+```{r}
+#Get attribute tables as dataframes and remove RGB values
+dsf_classes_df <- cats(dsf_classes) %>% 
+  as.data.frame()
+
+dsf_classes_df <- subset(dsf_classes_df, select = -c(R,G,B))
+
+dsf_lidar_df <- cats(dsf_classes_lidar) %>% 
+  as.data.frame()
+
+dsf_lidar_df <- subset(dsf_lidar_df, select = -c(R,G,B,A))
+
+#Set colnames to match for left_join
+colnames(dsf_lidar_df) <- c("VALUE", "VEGCLASS", "LIDARCOUNT")
+
+#leftjoin and calculate count difference and percentage remaining of each class
+dsf_classes_comp <- left_join(dsf_classes_df, dsf_lidar_df) %>% 
+  select(VALUE, VEGCLASS, COUNT, LIDARCOUNT) %>% 
+  mutate(
+    count_dif = COUNT - LIDARCOUNT,
+    percent_remain = (LIDARCOUNT/COUNT)*100
+  )
+
+```
+
