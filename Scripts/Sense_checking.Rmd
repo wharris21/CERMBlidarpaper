@@ -7,7 +7,6 @@ output: html_notebook
 knitr::opts_chunk$set(echo = TRUE)
 
 library(here)
-library(parallel)
 library(dplyr, warn.conflicts = FALSE)
 library(ggplot2)
 
@@ -124,5 +123,34 @@ dsf_classes_comp <- left_join(dsf_classes_df, dsf_lidar_df) %>%
     percent_remain = (LIDARCOUNT/COUNT)*100
   )
 
+head(dsf_classes_comp)
+
+```
+Creating sample points with 200m distance
+
+```{r}
+#Read lidar_metadata shp
+sp_vect <- terra::vect(LIDAR_METADATA_PATH)
+
+#Set projection to dsf_classes CRS
+sp_vect <- project(sp_vect, crs(dsf_classes_lidar))
+
+#Create raster from lidar_metadata.shp with a resolution with desired inter-point distance
+sp_template <- rast(sp_vect, resolution = c(200,200))
+
+#set some default values (may not be needed)
+values(sp_template) <- 1:ncell(sp_template)
+
+#mask sp_template raster to the lidar .shp to ensure no out-of-area points
+sp_template <- mask(sp_template, sp_vect)
+
+#Set raster to points (defaults to centroids)
+sp <- as.points(sp_template, na.rm= TRUE)
+
+#Intersect to only keep points in shape
+sp <- sp[sp_vect]
+
+#Check distance
+distance(sp[20], sp[21])
 ```
 
