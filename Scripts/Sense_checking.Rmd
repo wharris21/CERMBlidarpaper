@@ -28,6 +28,14 @@ DSF_MASK_PATH <- here::here("data/dsf_classes_with_lidar.tif")
 LIDAR_METADATA_PATH <- here::here("data/lidar_metadata.gpkg")
 ##Path to rasterised Lidar metadata
 RLIDAR_PATH <- here::here("data/lidar_coverage_3308.tif")
+
+##Path to NPWS estates
+NPWS_ESTATES_PATH <- here::here("data/npws_estates/NPWS_Estate.shp")
+
+##Path to NPWS fire history
+NPWS_FIREHIST_PATH <- here::here("data/NPWS_firehistory/NPWSFireHistory.shp")
+
+
 ```
 
 ```{r}
@@ -41,6 +49,7 @@ lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
 
 #Read rasterised lidar
 rlidar <- terra::rast(RLIDAR_PATH)
+
 ```
 
 ```{r}
@@ -127,41 +136,71 @@ head(dsf_classes_comp)
 
 ```
 
-Creating sample points with 200m distance
+Prepare NPWS estate layer by masking to lidar metadata extent
 
 ```{r}
 gc()
 
-INTERSAMPLE_DISTANCE <- 200
-sample_distance <- c(INTERSAMPLE_DISTANCE, INTERSAMPLE_DISTANCE)
+#Read npws_estate shapefile
+npws_estates <- terra::vect(NPWS_ESTATES_PATH)
 
-#Read lidar_metadata shp
-sp_vect <- terra::vect(LIDAR_METADATA_PATH)
+#Mask NPWS estates to lidar holdings
+##Ensure both are in the same CRS
+npws_estates <- terra::project(npws_estates, crs(lidar_metadata))
 
-#Set projection to dsf_classes CRS
-sp_vect <- project(sp_vect, crs(dsf_classes_lidar))
+##Mask
+npws_estates_mask <- terra::mask(npws_estates, lidar_metadata)
 
-#Create raster from lidar_metadata.shp with a resolution with desired inter-point distance
-sp_template <- rast(sp_vect, resolution = sample_distance)
+```
 
-#set some default values (may not be needed)
-values(sp_template) <- 1:ncell(sp_template)
+Creating sample points with 200m distance over the extent of NPWS estates within the lidar holdings coverage
 
-#mask sp_template raster to the lidar .shp to ensure no out-of-area points
-sp_template <- mask(sp_template, sp_vect)
+```{r}
+gc()
 
-#Set raster to points (defaults to centroids)
-sp <- as.points(sp_template, na.rm= TRUE)
+create_sample_points <- function(SpatVector, distance){
+  
+  print(paste0("inter point distance set to ", distance,(" meters!")))
+  
+  sample_distance <- c(distance, distance)
+  
+    #Read lidar_metadata shp
+    sp_vect <- SpatVector
+    
+    #Create raster from lidar_metadata.shp with a resolution with desired inter-point distance
+    sp_template <- rast(sp_vect, resolution = sample_distance)
+    
+    #set some default values (may not be needed)
+    values(sp_template) <- 1:ncell(sp_template)
+    
+    #mask sp_template raster to the lidar .shp to ensure no out-of-area points
+    sp_template <- mask(sp_template, sp_vect)
+    
+    #Set raster to points (defaults to centroids)
+    sp <- as.points(sp_template, na.rm= TRUE)
+    
+    #Intersect to only keep points in shape
+    sp <- sp[sp_vect]
+    
+    print(paste0("Created ", length(sp), " points! Wow! That's a lot!"))
+  
+  return(sp)
+}
 
-#Intersect to only keep points in shape
-sp <- sp[sp_vect]
+sample_points <- create_sample_points(npws_estates_mask, 10000)
+```
 
-test_extract <- terra::extract(dsf_classes_lidar, sp, xy = TRUE) %>% 
-  na.omit()
+Extract using sample points
 
-terra::writeVector(sp, here("data/sample_points.shp"), overwrite = TRUE)
+```{r}
+#Extract most recent fire for NPWS fire history
+npws_fire_extract <- terra::extract(npws_firehistory, sample_points)
 
-#Check distance
-distance(sp[20], sp[21])
+#fire year is included with fire type as a variable, these need to be split
+#substring fire year
+npws_fire_extract$year <- substr(npws_fire_extract$Label, 1, 4)
+npws_fire_extract$type <- substr(npws_fire_extract$Label, 8, 30)
+
+
 ```
 
