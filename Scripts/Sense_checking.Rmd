@@ -126,9 +126,15 @@ dsf_classes_comp <- left_join(dsf_classes_df, dsf_lidar_df) %>%
 head(dsf_classes_comp)
 
 ```
+
 Creating sample points with 200m distance
 
 ```{r}
+gc()
+
+INTERSAMPLE_DISTANCE <- 200
+sample_distance <- c(INTERSAMPLE_DISTANCE, INTERSAMPLE_DISTANCE)
+
 #Read lidar_metadata shp
 sp_vect <- terra::vect(LIDAR_METADATA_PATH)
 
@@ -136,7 +142,7 @@ sp_vect <- terra::vect(LIDAR_METADATA_PATH)
 sp_vect <- project(sp_vect, crs(dsf_classes_lidar))
 
 #Create raster from lidar_metadata.shp with a resolution with desired inter-point distance
-sp_template <- rast(sp_vect, resolution = c(200,200))
+sp_template <- rast(sp_vect, resolution = sample_distance)
 
 #set some default values (may not be needed)
 values(sp_template) <- 1:ncell(sp_template)
@@ -149,6 +155,11 @@ sp <- as.points(sp_template, na.rm= TRUE)
 
 #Intersect to only keep points in shape
 sp <- sp[sp_vect]
+
+test_extract <- terra::extract(dsf_classes_lidar, sp, xy = TRUE) %>% 
+  na.omit()
+
+terra::writeVector(sp, here("data/sample_points.shp"), overwrite = TRUE)
 
 #Check distance
 distance(sp[20], sp[21])
