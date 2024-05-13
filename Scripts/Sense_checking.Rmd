@@ -52,6 +52,8 @@ rlidar <- terra::rast(RLIDAR_PATH)
 
 ```
 
+Code chunk for doing random checks
+
 ```{r}
 #Quick check to sample the which class is most common
 set.seed(1)
@@ -59,6 +61,7 @@ pts <- terra::spatSample(as.polygons(lidar_metadata), 10000)
 test <- terra::extract(dsf_classes, pts)
 
 ggplot(na.omit(test), aes(VEGCLASS)) + geom_bar() + scale_x_discrete(guide = guide_axis(angle = 90))
+
 ```
 
 Masking dry sclerophyll raster to rasterised lidar extent
@@ -129,7 +132,8 @@ dsf_classes_comp <- left_join(dsf_classes_df, dsf_lidar_df) %>%
   select(VALUE, VEGCLASS, COUNT, LIDARCOUNT) %>% 
   mutate(
     count_dif = COUNT - LIDARCOUNT,
-    percent_remain = (LIDARCOUNT/COUNT)*100
+    percent_remain = (LIDARCOUNT/COUNT)*100,
+    area_reamain = ((LIDARCOUNT*(5^2))/1000000)
   )
 
 head(dsf_classes_comp)
@@ -177,7 +181,7 @@ create_sample_points <- function(SpatVector, distance){
     sp_template <- mask(sp_template, sp_vect)
     
     #Set raster to points (defaults to centroids)
-    sp <- as.points(sp_template, na.rm= TRUE)
+    sp <- as.points(sp_template, na.rm = TRUE)
     
     #Intersect to only keep points in shape
     sp <- sp[sp_vect]
@@ -188,19 +192,76 @@ create_sample_points <- function(SpatVector, distance){
 }
 
 sample_points <- create_sample_points(npws_estates_mask, 10000)
+terra::writeVector(sample_points, here::here("data/sample_points.shp"), overwrite=TRUE)
+sample_point_path <- here("data/sample_points.shp")
 ```
 
 Extract using sample points
 
 ```{r}
-#Extract most recent fire for NPWS fire history
-npws_fire_extract <- terra::extract(npws_firehistory, sample_points)
+#function to check CRS and extract point data from rasters or vectors
+point_extract <- function(points, data){
+  s <- points
+  r <- data
+  
+  s <- terra::project(s, crs(r))
+  out <- terra::extract(r, s)
+  return(out)
+}
 
-#fire year is included with fire type as a variable, these need to be split
-#substring fire year
-npws_fire_extract$year <- substr(npws_fire_extract$Label, 1, 4)
-npws_fire_extract$type <- substr(npws_fire_extract$Label, 8, 30)
 
+
+
+#Read NPWS fire history
+npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
+
+#read sample point shp
+sample_point_path <- here("data/sample_points.shp")
+sample_points <- terra::vect(sample_point_path)
+
+#extract npws fire history
+npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
+npws_fire_extract <- point_extract(sample_points, npws_firehistory)
+colnames(npws_fire_extract)[1]
+
+#Extract lidar data and rename id.y column to ID
+lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
+lidar_extract <- point_extract(sample_points, lidar_metadata)
+colnames(lidar_extract)[1] <- "ID"
+
+#Extract vegclass
+##Read dsf class raster
+dsf_class_mask <- terra::rast(DSF_MASK_PATH)
+dsf_class_extract <- point_extract(sample_points, dsf_class_mask)
+
+#Create data table df
+data <- npws_fire_extract
+colnames(data)[1] <- "ID"
+
+#join data and lidar extracts
+data <- dplyr::left_join(data, lidar_extract, by = "ID")
+
+#join data and firehistory extracts
+data <- left_join(data, dsf_class_extract, by = "ID") 
+
+#Remove rows that are outside of DSF range
+data <- data[!is.na(data$Class),]
+  
+#fire year is included with fire type as a variable, these need to be split by substring fire year
+data$fireyear <- substr(data$Label, 1, 4)
+data$firetype <- substr(data$Label, 8, 30)
+
+#Set na fireyears to 1970 (long unburnt)
+data$fireyear[is.na(data$fireyear)] <- 1970
+data$firetype[is.na(data$firetype)] <- "Wildfire"
+
+#Keep most recent fire at each point
+data <- data %>% 
+  group_by(ID) %>%
+  dplyr::filter(fireyear == max(fireyear)) %>% 
+  ungroup()
+
+#Get lidar capture start as date 
+data$lidar_capture_date <- as.Date(data$capture_end)
 
 ```
-
