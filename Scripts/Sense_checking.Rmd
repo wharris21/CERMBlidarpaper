@@ -15,14 +15,12 @@ library(gdalraster)
 
 ```
 
-```{r}
+```{r paths}
 #Data paths
 ## Path to Dry Sclerophyll forest classes
 DSF_CLASS_PATH <- here::here("data/dsf_classes.tif")
 ##Path to masked Dry Sclerophyll forest classes with attribute table
 DSF_MASK_PATH <- here::here("data/dsf_classes_with_lidar.tif")
-
-
 
 ##Path to Lidar Metadata
 LIDAR_METADATA_PATH <- here::here("data/lidar_metadata.gpkg")
@@ -31,11 +29,8 @@ RLIDAR_PATH <- here::here("data/lidar_coverage_3308.tif")
 
 ##Path to NPWS estates
 NPWS_ESTATES_PATH <- here::here("data/npws_estates/NPWS_Estate.shp")
-
 ##Path to NPWS fire history
 NPWS_FIREHIST_PATH <- here::here("data/NPWS_firehistory/NPWSFireHistory.shp")
-
-
 ```
 
 ```{r}
@@ -190,7 +185,11 @@ create_sample_points <- function(SpatVector, distance){
   
   return(sp)
 }
+```
 
+Create sample points over NPWS estates
+
+```{r}
 sample_points <- create_sample_points(npws_estates_mask, 10000)
 terra::writeVector(sample_points, here::here("data/sample_points.shp"), overwrite=TRUE)
 sample_point_path <- here("data/sample_points.shp")
@@ -208,9 +207,6 @@ point_extract <- function(points, data){
   out <- terra::extract(r, s)
   return(out)
 }
-
-
-
 
 #Read NPWS fire history
 npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
@@ -234,6 +230,9 @@ colnames(lidar_extract)[1] <- "ID"
 dsf_class_mask <- terra::rast(DSF_MASK_PATH)
 dsf_class_extract <- point_extract(sample_points, dsf_class_mask)
 
+##Remove out of area DSF classes
+REMOVE_CLASSES <- c("")
+
 #Create data table df
 data <- npws_fire_extract
 colnames(data)[1] <- "ID"
@@ -248,20 +247,22 @@ data <- left_join(data, dsf_class_extract, by = "ID")
 data <- data[!is.na(data$Class),]
   
 #fire year is included with fire type as a variable, these need to be split by substring fire year
-data$fireyear <- substr(data$Label, 1, 4)
-data$firetype <- substr(data$Label, 8, 30)
-
-#Set na fireyears to 1970 (long unburnt)
-data$fireyear[is.na(data$fireyear)] <- 1970
-data$firetype[is.na(data$firetype)] <- "Wildfire"
-
-#Keep most recent fire at each point
-data <- data %>% 
-  group_by(ID) %>%
-  dplyr::filter(fireyear == max(fireyear)) %>% 
-  ungroup()
+data$fireyear <- paste0((substr(data$Label, 1, 4)),"-12-31") %>% 
+                          as.Date()
+data$firetype <- substr(data$Label, 9, 30) %>% 
+  as.factor()
 
 #Get lidar capture start as date 
 data$lidar_capture_date <- as.Date(data$capture_end)
+
+#Filter the last wildfire prior to the most recent lidar pass
+test <- data %>% 
+  group_by(ID) %>% 
+   
+  dplyr::filter(fireyear < lidar_capture_date) %>% #Keep fire that occurred before most recent lidar pass
+  dplyr::filter(fireyear == max(fireyear)) %>% #Keep most recent fire
+  dplyr::filter(firetype == "Wildfire") %>% #Keep only wildfires
+   
+  ungroup()
 
 ```
