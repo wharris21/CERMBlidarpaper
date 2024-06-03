@@ -7,11 +7,11 @@ output: html_notebook
 knitr::opts_chunk$set(echo = TRUE)
 
 library(here)
-library(dplyr, warn.conflicts = FALSE)
+library(tidyverse, warn.conflicts = FALSE)
 library(ggplot2)
 
 library(terra)
-library(gdalraster)
+#library(gdalraster) #for building raster table, not required
 
 ```
 
@@ -142,6 +142,8 @@ gc()
 
 #Read npws_estate shapefile
 npws_estates <- terra::vect(NPWS_ESTATES_PATH)
+#Read lidar metadata shapefiles
+lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
 
 #Mask NPWS estates to lidar holdings
 ##Ensure both are in the same CRS
@@ -190,9 +192,9 @@ create_sample_points <- function(SpatVector, distance){
 Create sample points over NPWS estates
 
 ```{r}
-sample_points <- create_sample_points(npws_estates_mask, 10000)
-terra::writeVector(sample_points, here::here("data/sample_points.shp"), overwrite=TRUE)
-sample_point_path <- here("data/sample_points.shp")
+sample_points <- create_sample_points(npws_estates_mask, 200)
+terra::writeVector(sample_points, here::here("data/sample_points_200.shp"), overwrite=TRUE)
+sample_point_path <- here("data/sample_points_200.shp")
 ```
 
 Extract using sample points
@@ -202,10 +204,15 @@ Extract using sample points
 point_extract <- function(points, data){
   s <- points
   r <- data
-  
+  if (crs(s) != crs(r)) {
+  message("CRS doesn't match")
   s <- terra::project(s, crs(r))
+  message("Points reprojected!")
+  }
+  message("Running extract!")
   out <- terra::extract(r, s)
-  return(out)
+  message(paste0("Successfully extracted ",nrow(out)," points!"))
+  out
 }
 
 #Read NPWS fire history
@@ -230,9 +237,6 @@ colnames(lidar_extract)[1] <- "ID"
 dsf_class_mask <- terra::rast(DSF_MASK_PATH)
 dsf_class_extract <- point_extract(sample_points, dsf_class_mask)
 
-##Remove out of area DSF classes
-REMOVE_CLASSES <- c("")
-
 #Create data table df
 data <- npws_fire_extract
 colnames(data)[1] <- "ID"
@@ -241,11 +245,16 @@ colnames(data)[1] <- "ID"
 data <- dplyr::left_join(data, lidar_extract, by = "ID")
 
 #join data and firehistory extracts
-data <- left_join(data, dsf_class_extract, by = "ID") 
+data <- left_join(data, dsf_class_extract, by = "ID")
+
+#create and join point coordinates
+point_crds <- crds(sample_points, df = TRUE)
+point_crds <- tibble::rowid_to_column(point_crds, "ID")
+data <- left_join(data, point_crds, by = "ID")
 
 #Remove rows that are outside of DSF range
 data <- data[!is.na(data$Class),]
-  
+
 #fire year is included with fire type as a variable, these need to be split by substring fire year
 data$fireyear <- paste0((substr(data$Label, 1, 4)),"-12-31") %>% 
                           as.Date()
@@ -256,7 +265,7 @@ data$firetype <- substr(data$Label, 9, 30) %>%
 data$lidar_capture_date <- as.Date(data$capture_end)
 
 #Filter the last wildfire prior to the most recent lidar pass
-test <- data %>% 
+data <- data %>% 
   group_by(ID) %>% 
    
   dplyr::filter(fireyear < lidar_capture_date) %>% #Keep fire that occurred before most recent lidar pass
@@ -265,4 +274,117 @@ test <- data %>%
    
   ungroup()
 
+#Remove duplicate fires
+data <- data %>% 
+  distinct(ID, .keep_all = TRUE)
+
+#calculate tsf
+data$tsf_months <- -(interval(ymd(data$lidar_capture_date), ymd(data$fireyear)) %/% months(1))
 ```
+
+```{r}
+RAINFALL_PATH <- here::here("data/AGCD_monthly_rainfall")
+
+#Query rainfall data
+get_rainfall_data <- function(){
+  
+  #create rainfall_data df and get first and second years
+  rainfall_data <- data %>%
+  select("ID", "fireyear") %>% 
+  mutate(year1 = substr(
+    fireyear + years(1),
+    1, 4),
+    
+    year2 = substr(
+    fireyear + years(2),
+    1, 4)
+    )
+  
+  # Initialize empty data frames to store file paths for each year
+  year1df <- data.frame()
+  year2df <- data.frame()
+  out <- data.frame()
+  
+  # Loop through each pattern in the 'year1' column of 'rainfall_data'
+  for (i in rainfall_data$year1){
+     
+    # Get file paths that match the pattern for year 1
+    year1filepath <- list.files(RAINFALL_PATH, pattern = i, full.names = TRUE)
+    
+    # Append the file paths to the 'year1df' data frame
+    year1df <- rbind(year1df, year1filepath)
+  }
+  
+  # Loop through each pattern in the 'year2' column of 'rainfall_data'
+  for (i in rainfall_data$year2){
+     
+    # Get file paths that match the pattern for year 2
+    year2filepath <- list.files(RAINFALL_PATH, pattern = i, full.names = TRUE)
+    
+    # Append the file paths to the 'year2df' data frame
+    year2df <- rbind(year2df, year2filepath)
+  }
+  
+  # Combine 'year1df' and 'year2df'
+  out <- cbind(year1df, year2df)
+  
+  # Assign column names to the output data frame
+  colnames(out) <- c("year1path", "year2path")
+  
+  # Bind outputs and return the output data frame
+  rainfall_data <- bind_cols(rainfall_data, out)
+  
+  rainfall_data
+}
+
+rainfall_data <- get_rainfall_data()
+
+
+test <- rainfall_data %>% 
+  select("ID", "year1path") %>% 
+  group_by(year1path) %>% 
+  
+
+
+
+
+
+
+#Create a list of years
+
+
+#Extract the rainfall data for all months in given years
+#Remove unnecessary months
+#Add rainfall together
+#Create output columns
+
+```
+
+g```{r}
+#create summary table
+#number of points per class
+data_sum <- data %>% 
+  group_by(Class) %>% 
+  count(Class)
+
+ymax <- data %>% 
+  group_by(Class) %>% 
+  summarize(max(y)) %>% 
+  ungroup()
+  #summarize(min(y))
+
+ymin <- data %>% 
+  group_by(Class) %>% 
+  summarize(min(y)) %>% 
+  ungroup()
+
+data_sum <- left_join(data_sum, ymax, by = "Class")
+data_sum <- left_join(data_sum, ymin, by = "Class")
+
+colnames(data_sum) <- c("class", "n", "ymax", "ymin")
+
+data_sum <- data_sum %>% 
+  mutate(
+    ydif = (ymax - ymin)/1000)
+```
+
