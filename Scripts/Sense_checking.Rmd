@@ -10,6 +10,8 @@ library(here)
 library(tidyverse, warn.conflicts = FALSE)
 library(ggplot2)
 
+library(sf)
+library(stars)
 library(terra)
 #library(gdalraster) #for building raster table, not required
 
@@ -33,32 +35,6 @@ NPWS_ESTATES_PATH <- here::here("data/npws_estates/NPWS_Estate.shp")
 NPWS_FIREHIST_PATH <- here::here("data/NPWS_firehistory/NPWSFireHistory.shp")
 ```
 
-```{r}
-#Read data files
-#Read dsf classes
-dsf_classes <- terra::rast(DSF_CLASS_PATH)
-dsf_classes_lidar <- terra::rast(DSF_MASK_PATH)
-
-#read lidar metadata
-lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
-
-#Read rasterised lidar
-rlidar <- terra::rast(RLIDAR_PATH)
-
-```
-
-Code chunk for doing random checks
-
-```{r}
-#Quick check to sample the which class is most common
-set.seed(1)
-pts <- terra::spatSample(as.polygons(lidar_metadata), 10000)
-test <- terra::extract(dsf_classes, pts)
-
-ggplot(na.omit(test), aes(VEGCLASS)) + geom_bar() + scale_x_discrete(guide = guide_axis(angle = 90))
-
-```
-
 Masking dry sclerophyll raster to rasterised lidar extent
 
 ```{r}
@@ -72,37 +48,6 @@ rlidar_crop <- teraa::crop(rlidar, dsf_classes_lidar)
 #mask dsf_crop raster with cropped, rasterised lidar and write to disk
 rdsf_mask <- terra::mask(dsf_classes_lidar, rlidar_crop)
 terra::writeRaster(rdsf_mask, here::here("data/rdsf_mask.tif"))
-```
-
-Creating new attribute table with gdalraster (see DSF_class_raster.rmd). Turns out QGIS is a lot faster than this.
-
-```{r}
-#Read masked rdsf file
-#Read masked rdsf file
-rdsf_mask <- terra::rast(DSF_MASK_PATH)
-dsf_classes <- terra::rast(DSF_CLASS_PATH)
-
-#get cats list
-rdsf_mask_classes <- terra::cats(rdsf_mask)
-
-#make new attribute table using gdalraster
-gdsf_mask <- new(GDALRaster, DSF_MASK_PATH, read_only = FALSE)
-
-dsf_colours <- palette.colors(length(rdsf_mask), palette = "Alphabet") %>%
-  col2rgb() %>%
-  t()
-
-dat_rat <- data.frame(VALUE = 1:length(rdsf_mask_classes),
-                      VEGCLASS = rdsf_mask_classes,
-                      R = dsf_colours[, "red"],
-                      G = dsf_colours[, "green"],
-                      B = dsf_colours[, "blue"])
-
-# Note: This will take a few minutes
-tbl <- gdalraster::buildRAT(gdsf_mask, table_type = "thematic", na_value = -9999, join_df = dat_rat)
-
-gdsf_mask$setDefaultRAT(band = 1, tbl)
-gdsf_mask$flushCache()
 ```
 
 Calculating percent coverage of DSF classes within Lidar extent
@@ -187,117 +132,149 @@ create_sample_points <- function(SpatVector, distance){
   
   return(sp)
 }
+
+#create sample points and write to disk
+sample_points <- create_sample_points(npws_estates_mask, 2000)
+terra::writeVector(sample_points, here::here("data/sample_points_2000.shp"), overwrite=TRUE)
 ```
 
-Create sample points over NPWS estates
-
-```{r}
-sample_points <- create_sample_points(npws_estates_mask, 200)
-terra::writeVector(sample_points, here::here("data/sample_points_200.shp"), overwrite=TRUE)
-sample_point_path <- here("data/sample_points_200.shp")
-```
 
 Extract using sample points
 
 ```{r}
 #function to check CRS and extract point data from rasters or vectors
 point_extract <- function(points, data){
-  s <- points
-  r <- data
-  if (crs(s) != crs(r)) {
+  p <- points
+  d <- data
+  if (crs(p) != crs(d)) {
   message("CRS doesn't match")
-  s <- terra::project(s, crs(r))
+  p <- st_transform(p, crs(d))
   message("Points reprojected!")
   }
   message("Running extract!")
-  out <- terra::extract(r, s)
+  p <- st_coordinates(p) %>% 
+    as.data.frame()
+  out <- terra::extract(d, p)
   message(paste0("Successfully extracted ",nrow(out)," points!"))
   out
 }
 
-#Read NPWS fire history
-npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
 
 #read sample point shp
-sample_point_path <- here("data/sample_points.shp")
-sample_points <- terra::vect(sample_point_path)
-
-#extract npws fire history
-npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
-npws_fire_extract <- point_extract(sample_points, npws_firehistory)
-colnames(npws_fire_extract)[1]
-
-#Extract lidar data and rename id.y column to ID
-lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
-lidar_extract <- point_extract(sample_points, lidar_metadata)
-colnames(lidar_extract)[1] <- "ID"
+SAMPLE_POINTS_PATH <- here("data/sample_points_200.shp")
+sample_points <- st_read(SAMPLE_POINTS_PATH)
+sample_points$ID <- 1:nrow(sample_points)
 
 #Extract vegclass
 ##Read dsf class raster
 dsf_class_mask <- terra::rast(DSF_MASK_PATH)
+
+#run point extract
 dsf_class_extract <- point_extract(sample_points, dsf_class_mask)
 
-#Create data table df
-data <- npws_fire_extract
-colnames(data)[1] <- "ID"
+#shannanigans to maintain geometry and correct point ID, while also keeping the rest of the code working
+dsf_class_extract <- left_join(dsf_class_extract, sample_points, by = "ID")
+colnames(dsf_class_extract) <- c("to_remove", "class", "ID", "geometry")
+dsf_class_extract$row_id <- 1:nrow(dsf_class_extract)
+dsf_class_extract$to_remove <- NULL
+
+dsf_class_extract <- na.omit(dsf_class_extract)
+
+#extract npws fire history
+npws_fire_extract <- st_read(here("data/npws_extract.shp"))
+npws_fire_extract$row_id <- 1:nrow(npws_fire_extract)
+#npws_firehistory <- terra::vect(NPWS_FIREHIST_PATH)
+#npws_fire_extract <- point_extract(data, npws_firehistory)
+#colnames(npws_fire_extract)[1]
+
+#Extract lidar data and rename id.y column to ID
+lidar_metadata <- terra::vect(LIDAR_METADATA_PATH)
+lidar_extract <- point_extract(st_as_sf(data), lidar_metadata)
+colnames(lidar_extract)[1] <- "row_id"
+
+#Create data table
+data <- dsf_class_extract
+
+#create point ID columns for joinging
+data$row_id <- 1:nrow(data)
 
 #join data and lidar extracts
-data <- dplyr::left_join(data, lidar_extract, by = "ID")
+data <- dplyr::left_join(data, lidar_extract, by = "row_id")
 
 #join data and firehistory extracts
-data <- left_join(data, dsf_class_extract, by = "ID")
-
-#create and join point coordinates
-point_crds <- crds(sample_points, df = TRUE)
-point_crds <- tibble::rowid_to_column(point_crds, "ID")
-data <- left_join(data, point_crds, by = "ID")
+data <- dplyr::left_join(data, npws_fire_extract, by = "row_id")
 
 #Remove rows that are outside of DSF range
-data <- data[!is.na(data$Class),]
+data <- data[!is.na(data$class),]
 
 #fire year is included with fire type as a variable, these need to be split by substring fire year
-data$fireyear <- paste0((substr(data$Label, 1, 4)),"-12-31") %>% 
+##Get fire data for use in calculating TSF
+data$firedate <- paste0((substr(data$Label, 1, 4)),"-12-31") %>% 
                           as.Date()
+
+##Simpler fire year for use in later rainfall calculations or anything else that doesn't need a date format
+data$fireyear <- substr(data$Label, 1, 4)
+
 data$firetype <- substr(data$Label, 9, 30) %>% 
   as.factor()
 
 #Get lidar capture start as date 
 data$lidar_capture_date <- as.Date(data$capture_end)
 
+
 #Filter the last wildfire prior to the most recent lidar pass
 data <- data %>% 
-  group_by(ID) %>% 
-   
-  dplyr::filter(fireyear < lidar_capture_date) %>% #Keep fire that occurred before most recent lidar pass
-  dplyr::filter(fireyear == max(fireyear)) %>% #Keep most recent fire
-  dplyr::filter(firetype == "Wildfire") %>% #Keep only wildfires
-   
+  group_by(row_id) %>% 
+  filter(firedate == max(firedate)) %>% 
   ungroup()
+
+#filter for only wildfires and where firedate is before the most recent lidar
+data1 <- data %>% 
+  filter(firetype == "Wildfire") %>% 
+  filter(firedate < lidar_capture_date)
 
 #Remove duplicate fires
 data <- data %>% 
-  distinct(ID, .keep_all = TRUE)
+  distinct(row_id, .keep_all = TRUE)
+
+data$geometry.y <- NULL
 
 #calculate tsf
-data$tsf_months <- -(interval(ymd(data$lidar_capture_date), ymd(data$fireyear)) %/% months(1))
+data$tsf_months <- -(interval(ymd(data$lidar_capture_date), ymd(data$firedate)) %/% months(1))
+
+#create sf geometry columns
+data <- st_as_sf(data)
+
+st_write(data, here("data/data.shp"), append = FALSE)
+
 ```
 
+Functions for calculating post-fire rainfall data
+
 ```{r}
+#Getting rainfall data
 RAINFALL_PATH <- here::here("data/AGCD_monthly_rainfall")
 
 #Query rainfall data
 get_rainfall_data <- function(){
   
-  #create rainfall_data df and get first and second years
-  rainfall_data <- data %>%
-  select("ID", "fireyear") %>% 
-  mutate(year1 = substr(
+  #create rainfall_setup df and get first and second years
+  rainfall_setup <- data %>%
+  select("ID", "fireyear", "lidar_capture_date","geometry") %>% 
+  mutate(
+    
+    lidarmonth = substr(lidar_capture_date, 6, 7),
+    
+    year1 = substr(
     fireyear + years(1),
     1, 4),
     
     year2 = substr(
     fireyear + years(2),
-    1, 4)
+    1, 4),
+    
+    geometry = geometry
+   
     )
   
   # Initialize empty data frames to store file paths for each year
@@ -305,8 +282,8 @@ get_rainfall_data <- function(){
   year2df <- data.frame()
   out <- data.frame()
   
-  # Loop through each pattern in the 'year1' column of 'rainfall_data'
-  for (i in rainfall_data$year1){
+  # Loop through each pattern in the 'year1' column of 'rainfall_setup'
+  for (i in rainfall_setup$year1){
      
     # Get file paths that match the pattern for year 1
     year1filepath <- list.files(RAINFALL_PATH, pattern = i, full.names = TRUE)
@@ -315,8 +292,8 @@ get_rainfall_data <- function(){
     year1df <- rbind(year1df, year1filepath)
   }
   
-  # Loop through each pattern in the 'year2' column of 'rainfall_data'
-  for (i in rainfall_data$year2){
+  # Loop through each pattern in the 'year2' column of 'rainfall_setup'
+  for (i in rainfall_setup$year2){
      
     # Get file paths that match the pattern for year 2
     year2filepath <- list.files(RAINFALL_PATH, pattern = i, full.names = TRUE)
@@ -332,35 +309,150 @@ get_rainfall_data <- function(){
   colnames(out) <- c("year1path", "year2path")
   
   # Bind outputs and return the output data frame
-  rainfall_data <- bind_cols(rainfall_data, out)
+  rainfall_setup <- bind_cols(rainfall_setup, out)
   
-  rainfall_data
+  #read first raster to check crs
+  test_raster <- terra::rast(list.files(RAINFALL_PATH, full.names = TRUE)[1])
+  targetcrs <- crs(test_raster)
+  #transform rainfalldata to crs of raster
+  rainfall_setup <- st_transform(rainfall_setup, targetcrs)
+  
+  #create output data frames
+  
+  year1rain <- data.frame()
+  year2rain <- data.frame()
+  
+  #Extract rainfall data for first 12 months
+  for(i in seq_along(rainfall_setup$ID)){
+    path <- rainfall_setup[i,8] %>% #get path of first year1 raster
+      st_drop_geometry() %>% #remove geometry info
+      as.character() #convert to character string
+    point <- rainfall_setup[i,4] %>%  #get coordinates of first point
+      st_coordinates() %>% 
+      as.data.frame()
+    
+    r <- terra::rast(path) #load raster
+    e <- terra::extract(r, point) #extract rainfall from raster
+    
+    rain_sum <- e %>% #sum the first 12 months
+      mutate(year1rain = sum(e[2:13]))
+    
+    rain_sum[,1:13] <- list(NULL) #remove ID and individual month columns
+      
+    year1rain <- bind_rows(year1rain, rain_sum) #bind to output df
+  }
+  
+  for(i in seq_along(rainfall_setup$ID)){
+    path <- rainfall_setup[i,9] %>%
+      st_drop_geometry() %>% 
+      as.character()
+    point <- rainfall_setup[i,4] %>% 
+      st_coordinates() %>% 
+      as.data.frame()
+    
+    r <- terra::rast(path)
+    e <- terra::extract(r, point)
+    
+    rain_sum <- e %>%
+      mutate(year2rain = sum(e[2:13]))
+    
+    rain_sum[,1:13] <- list(NULL) #remove ID and individual month columns
+    
+    
+    year2rain <- bind_rows(year2rain, rain_sum) #bind to output df
+  }
+  out <- data.frame() #create final df
+  out <- bind_cols(year1rain, year2rain) #bind to final df
+  out <- out %>% 
+    mutate(postfire_rainfall = year1rain + year2rain)
+  
+  out <- bind_cols(rainfall_setup, out)
 }
+
 
 rainfall_data <- get_rainfall_data()
 
+rainfall_data <- st_transform(rainfall_data, crs(data))
 
-test <- rainfall_data %>% 
-  select("ID", "year1path") %>% 
-  group_by(year1path) %>% 
-  
+rainfall_data_join <- rainfall_data[,-1:-9] %>% 
+  st_drop_geometry()
 
+data <- bind_cols(data, rainfall_data_join)
 
+#Check if any lidar captures occured within 2 years of a fire
+data <- data %>% 
+    mutate(rainfall_after_lidar = ifelse(substr(lidar_capture_date, 0,4) < substr(fireyear + years(2), 1, 4), NA, TRUE))%>%
+    filter(!is.na(rainfall_after_lidar)) %>% 
+      select(-rainfall_after_lidar)
 
-
-
-
-#Create a list of years
-
-
-#Extract the rainfall data for all months in given years
-#Remove unnecessary months
-#Add rainfall together
-#Create output columns
+st_write(data, here("data/data.shp"))
 
 ```
 
-g```{r}
+```{r}
+
+extract_raster_data_by_year <- function(df, year_column, raster_list) {
+  
+  #Get crs of rasters
+  target_crs <- terra::rast(raster_list[1]) %>% 
+    crs()
+  
+  #read data as sf object
+  data <- st_as_sf(data)
+  data <- st_transform(data, target_crs)
+  
+  # Get unique years from the data
+  unique_years <- unique(data[[year_column]])
+  
+  # Initialize a list to store extracted data
+  results <- data.frame()
+  
+  # Loop over each year
+  for (year in unique_years) {
+    # Subset data for the current year
+    subset_data <- data %>% filter(!!sym(year_column) == year)
+    
+    #get points for data subset
+    points <- st_transform(subset_data, target_crs) %>% 
+              st_coordinates() %>% 
+              as.data.frame()
+    
+    # Find the raster file corresponding to the year
+    raster_file1 <- raster_list[grep(year, raster_list)]
+    year2 = as.numeric(year) + 1
+    raster_file2 <- raster_list[grep(year2, raster_list)]
+    
+    # Read the raster file
+    raster_data <- terra::rast(c(raster_file1, raster_file2))
+      
+    # Extract data from the raster using the provided points
+    e <- terra::extract(raster_data, points)
+    colnames(e) <- 1:25
+    e$ID <- subset_data$ID
+    e$sum <- rowSums(select(e, 2:25))
+      
+    loop_out <- data.frame(ID = e$ID, postfirerain = e$sum)
+    results <- bind_rows(results, loop_out)
+  }
+  
+  return(results)
+}
+
+#Get list of rainfall raster files
+raster_list <- list.files(here("data/AGCD_monthly_rainfall"), full.names = TRUE)
+
+#read data table
+data <- st_read(here("data/data.shp"))
+
+# Extract raster data for all years
+rainfall_data <- extract_raster_data_by_year(data, "fireyer", raster_list)
+
+data <- left_join(data, rainfall_data, by = "ID")
+st_write(data, here("data/data.shp"), append = FALSE)
+```
+
+
+```{r}
 #create summary table
 #number of points per class
 data_sum <- data %>% 
@@ -371,20 +463,42 @@ ymax <- data %>%
   group_by(Class) %>% 
   summarize(max(y)) %>% 
   ungroup()
-  #summarize(min(y))
 
 ymin <- data %>% 
   group_by(Class) %>% 
   summarize(min(y)) %>% 
   ungroup()
 
+xmax <- data %>% 
+  group_by(Class) %>% 
+  summarize(max(x)) %>% 
+  ungroup()
+  #summarize(min(y))
+
+xmin <- data %>% 
+  group_by(Class) %>% 
+  summarize(min(x)) %>% 
+  ungroup()
+
 data_sum <- left_join(data_sum, ymax, by = "Class")
 data_sum <- left_join(data_sum, ymin, by = "Class")
+data_sum <- left_join(data_sum, xmax, by = "Class")
+data_sum <- left_join(data_sum, xmin, by = "Class")
 
-colnames(data_sum) <- c("class", "n", "ymax", "ymin")
+colnames(data_sum) <- c("class", "n", "ymax", "ymin", "xmax", "xmin")
 
 data_sum <- data_sum %>% 
   mutate(
-    ydif = (ymax - ymin)/1000)
+    ydif = (ymax - ymin)/1000,
+    xdif = (xmax - xmin)/1000)
+
+write.csv(data_sum, here("data/datasum_table.csv"))
+
+#add columns for number of sample points with no fire
+#add na value (maybe -1) for long unburnt values
+#Check tsf distribution for each forest class
+#Thinking about what to do with points with less than 2 years between fire and lidar (makes post-fire rainfall tricky)
+
+
 ```
 
