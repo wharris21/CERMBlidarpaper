@@ -261,9 +261,9 @@ extract_raster_data_by_year <- function(sf, year_column, raster_list) {
       st_as_sf()
     
     #Get years
-    prefire <- as.numeric(year) - 1
-    postfire <- as.numeric(year)
-    postfire1 <- as.numeric(year) + 1
+    prefire <- as.numeric(year)
+    postfire <- as.numeric(year) + 1
+    postfire1 <- as.numeric(year) + 2
     
     # Find the raster file path corresponding to each raster year
     prefire_rast <- raster_list[grep(prefire, raster_list)]
@@ -277,7 +277,6 @@ extract_raster_data_by_year <- function(sf, year_column, raster_list) {
     e <- terra::extract(raster_data, points)
     e[1] <- NULL
     colnames(e) <- firenamestring
-    e$year <- year
     results <- bind_rows(results, e)
   }
   
@@ -317,6 +316,16 @@ rainfall_long <- rainfall_data %>%
 data_rainfall <- left_join(data, as.data.frame(rainfall_data), by = "pointID")
 
 st_write(data_rainfall, here("data/data_rainfall.gpkg"), driver = "GPKG", append = FALSE)
+
+
+
+#Change prefire values to integer, -ve if prefire +ve if post fire, have integer as number of months
+#set month of fire (december) as 0 (november will be -1, october -2 etc.)
+#Same with prelidar
+#Prelidar rainfall
+#Just grab n whole months before lidar
+#e.g. if lidar was flown in september and we want 6 months, then we can grab march to september
+
 ```
 
 
